@@ -1255,6 +1255,30 @@ def get_skip_requested():
         return False
 
 
+def restart_edge_progress_socketio():
+    """
+    Desconecta o cliente Socket.IO e sobe de novo (ex.: após renovar JWT no heartbeat).
+    Evita ficar com sessão morta após falhas de rede ou token expirado.
+    """
+    global edge_progress_socketio_client, edge_progress_socketio_thread
+    with edge_progress_socketio_lock:
+        old_t = edge_progress_socketio_thread
+        try:
+            if edge_progress_socketio_client is not None:
+                edge_progress_socketio_client.disconnect()
+        except Exception:
+            pass
+        edge_progress_socketio_client = None
+        edge_progress_socketio_connected_event.clear()
+        if old_t is not None and old_t.is_alive():
+            try:
+                old_t.join(timeout=8)
+            except Exception:
+                pass
+        edge_progress_socketio_thread = None
+    init_edge_progress_socketio()
+
+
 def init_edge_progress_socketio():
     """
     Inicializa um cliente Socket.IO para enviar progresso do edge (play.py) ao backend.
@@ -1281,10 +1305,13 @@ def init_edge_progress_socketio():
             except Exception:
                 transports = ["polling"]
 
+            # reconnection_attempts=0 (padrão da lib) = reconexões ilimitadas.
+            # Valores >0 fazem o cliente desistir após N falhas ("giving up") e parar de tentar para sempre.
             client = socketio.Client(
                 reconnection=True,
-                reconnection_attempts=10,
+                reconnection_attempts=0,
                 reconnection_delay=1.0,
+                reconnection_delay_max=30.0,
                 logger=False,
                 engineio_logger=False,
                 request_timeout=3,
@@ -3484,6 +3511,22 @@ def _player_heartbeat_loop():
                 if r.status_code == 200:
                     http_ok = True
                     consecutive_failures = 0
+                elif r.status_code == 401:
+                    # JWT expirou (ex.: API Key com validade de dias) — renovar e religar Socket.IO com o token novo.
+                    print("[heartbeat] HTTP 401 — token expirado ou inválido; renovando autenticação...")
+                    if authenticate():
+                        try:
+                            restart_edge_progress_socketio()
+                        except Exception as _re_sio:
+                            print(f"[heartbeat] Falha ao reiniciar Socket.IO após reauth: {_re_sio}")
+                        consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
+                        if consecutive_failures % log_every_n_failures == 1:
+                            print(
+                                f"[heartbeat] Reautenticação falhou após 401. "
+                                f"Verifique API Key / rede. BASE_URL={BASE_URL}"
+                            )
                 else:
                     consecutive_failures += 1
                     if consecutive_failures % log_every_n_failures == 1:
