@@ -1,0 +1,1 @@
+cloudflared access tcp --hostname redis.epr.app.br --url 127.0.0.1:16379

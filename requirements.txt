@@ -1,0 +1,13 @@
+yt-dlp
+requests
+python-vlc
+flask
+flask-socketio
+keyboard
+browser-cookie3
+certifi
+urllib3
+pycaw 
+comtypes
+python-mpv
+redis
