@@ -61,6 +61,36 @@ from flask import Flask, jsonify, request
 from flask_socketio import SocketIO
 import keyboard
 import configparser
+
+# Linux: a lib `keyboard` só funciona com root (hooks em /dev/input). Testado uma vez em _init_physical_keyboard_listener.
+_physical_keyboard_enabled = None
+
+
+def _init_physical_keyboard_listener() -> bool:
+    """
+    Retorna True se atalhos físicos (skip/remove/lista) podem usar `keyboard.is_pressed`.
+    No Linux sem root, retorna False (sem spam de erro): skip/remover pelo app continua ativo.
+    """
+    global _physical_keyboard_enabled
+    if _physical_keyboard_enabled is not None:
+        return _physical_keyboard_enabled
+    if (os.environ.get("DISABLE_KEYBOARD_LISTENER") or "").strip().lower() in ("1", "true", "yes"):
+        print("[keyboard] DISABLE_KEYBOARD_LISTENER=1 — atalhos físicos desativados.")
+        _physical_keyboard_enabled = False
+        return False
+    if sys.platform.startswith("linux") and os.geteuid() != 0:
+        try:
+            keyboard.is_pressed("shift")
+        except Exception as e:
+            _physical_keyboard_enabled = False
+            print(
+                "[keyboard] Linux: atalhos de teclado físico exigem rodar como root (sudo) ou permissões uinput. "
+                f"Desativados: {e}\n"
+                "         Skip/remover/lista pelo app (admin) e Socket.IO continuam funcionando."
+            )
+            return False
+    _physical_keyboard_enabled = True
+    return True
 import re
 import secrets
 import subprocess
@@ -2512,6 +2542,7 @@ def _run_queue_modal():
 
 def handle_key_press(player):
     global current_playing_video, playlist, last_played_unique_ids, queue_modal_open, close_modal_flag
+    kb_physical = _init_physical_keyboard_listener()
     last_press_time = 0
     key_pressed = False
     
@@ -2576,7 +2607,7 @@ def handle_key_press(player):
                     import traceback
                     traceback.print_exc()
             # Tecla para exibir/ocultar lista da fila (modal no PC) — respeita [Controles] allow_show_list
-            elif ESTABLISHMENT_CONFIG.get('allow_show_list', True) and keyboard.is_pressed(KEYBOARD_CONFIG.get('show_list', 'l')):
+            elif kb_physical and ESTABLISHMENT_CONFIG.get('allow_show_list', True) and keyboard.is_pressed(KEYBOARD_CONFIG.get('show_list', 'l')):
                 current_time = time.time()
                 if current_time - last_show_list_time > KEYBOARD_CONFIG['debounce_time']:
                     last_show_list_time = current_time
@@ -2586,7 +2617,7 @@ def handle_key_press(player):
                         threading.Thread(target=_run_queue_modal, daemon=True).start()
                     key_pressed = True
             # Tecla para pular vídeo (configurada no config.ini) — respeita [Controles] allow_skip
-            elif ESTABLISHMENT_CONFIG.get('allow_skip', True) and keyboard.is_pressed(KEYBOARD_CONFIG['skip_video']):
+            elif kb_physical and ESTABLISHMENT_CONFIG.get('allow_skip', True) and keyboard.is_pressed(KEYBOARD_CONFIG['skip_video']):
                 current_time = time.time()
                 if not key_pressed and current_time - last_press_time > KEYBOARD_CONFIG['debounce_time']:
                     key_pressed = True
@@ -2644,7 +2675,7 @@ def handle_key_press(player):
                             traceback.print_exc()
             
             # Tecla configurada para remover vídeo manualmente — respeita [Controles] allow_remove
-            elif ESTABLISHMENT_CONFIG.get('allow_remove', True) and keyboard.is_pressed(KEYBOARD_CONFIG['remove_video']):
+            elif kb_physical and ESTABLISHMENT_CONFIG.get('allow_remove', True) and keyboard.is_pressed(KEYBOARD_CONFIG['remove_video']):
                 current_time = time.time()
                 if not key_pressed and current_time - last_press_time > KEYBOARD_CONFIG['debounce_time']:
                     key_pressed = True
