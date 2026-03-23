@@ -217,6 +217,10 @@ REQUEST_TIMEOUT_ADD_SEC = 8
 QUEUE_FETCH_MAX_RETRIES = 3
 queue_first_fetch_pending = True
 
+# GET /health no monitor — HTTPS remoto (ex.: app.epr.app.br) pode demorar >15s (TLS, rota, cold start).
+# Subir via [Player] health_check_timeout_seconds ou env HEALTH_CHECK_TIMEOUT_SEC.
+HEALTH_CHECK_TIMEOUT_SEC = int(os.environ.get("HEALTH_CHECK_TIMEOUT_SEC", "25"))
+
 
 def _backend_time_left_disabled_sec() -> int:
     try:
@@ -627,6 +631,22 @@ try:
             )
         except Exception:
             BACKEND_DISABLE_SECONDS = 15
+        try:
+            HEALTH_CHECK_TIMEOUT_SEC = max(
+                5,
+                min(
+                    120,
+                    int(
+                        config.get(
+                            'Player',
+                            'health_check_timeout_seconds',
+                            fallback=str(HEALTH_CHECK_TIMEOUT_SEC),
+                        )
+                    ),
+                ),
+            )
+        except Exception:
+            pass
     # Configurações por estabelecimento (créditos, distância, controles) — cada máquina pode ter seu config.ini
     def _get_establishment_config(cfg):
         out = {'minutes_per_real': 8, 'min_distance': 100, 'allow_skip': True, 'allow_remove': True,
@@ -3427,7 +3447,20 @@ def check_server_status():
             sid = (config.get('Server', 'server_id', fallback='') or '').strip()
             if sid:
                 health_url = f'{BASE_URL}/health?server_id={sid}'
-        response = requests.get(health_url, headers=REQUEST_HEADERS_CONNECTION_CLOSE, timeout=15, verify=False, proxies=REQUESTS_NO_PROXY)
+        try:
+            total = max(5, min(120, int(HEALTH_CHECK_TIMEOUT_SEC or 25)))
+        except Exception:
+            total = 25
+        # TCP/TLS separado do corpo da resposta: falha rápida se host morto; leitura pode ser mais longa em CDN.
+        connect_to = min(15, max(4, total // 2))
+        read_to = max(8, total - connect_to)
+        response = requests.get(
+            health_url,
+            headers=REQUEST_HEADERS_CONNECTION_CLOSE,
+            timeout=(connect_to, read_to),
+            verify=False,
+            proxies=REQUESTS_NO_PROXY,
+        )
         if response.status_code == 200:
             return True, 'ok'
         return False, f'HTTP {response.status_code}'
@@ -3469,17 +3502,25 @@ def monitor_server_status(player):
                     print(f"\n✅ Servidor voltou a responder após {consecutive_health_failures} falha(s).")
                 consecutive_health_failures = 0
             else:
-                consecutive_health_failures += 1
-                print(f"\n⚠️ Health check falhou ({consecutive_health_failures}/{max_consecutive_health_failures}): {detail} — BASE_URL={BASE_URL}")
-                _log_connection_failure(Exception(detail), stage='health', extra={'timeout': 15})
+                consecutive_health_failures = min(
+                    consecutive_health_failures + 1,
+                    max_consecutive_health_failures,
+                )
+                try:
+                    _ht = int(HEALTH_CHECK_TIMEOUT_SEC or 25)
+                except Exception:
+                    _ht = 25
+                print(
+                    f"\n⚠️ Health check falhou ({consecutive_health_failures}/{max_consecutive_health_failures}): "
+                    f"{detail} — BASE_URL={BASE_URL}"
+                )
+                _log_connection_failure(Exception(detail), stage='health', extra={'timeout': _ht})
                 if consecutive_health_failures >= max_consecutive_health_failures:
                     print(
                         f"\n❌ Servidor offline persistente após "
-                        f"{consecutive_health_failures} falhas consecutivas. "
+                        f"{max_consecutive_health_failures} falhas consecutivas. "
                         "Mantendo player ativo e tentando reconectar (modo resiliente)."
                     )
-                    # Evita contador infinito e mantém logs legíveis.
-                    consecutive_health_failures = max_consecutive_health_failures
             
             # Verifica se o player está travado
             if player.has_error():
@@ -3515,6 +3556,8 @@ def monitor_server_status(player):
             time.sleep(health_check_interval)
 
 HEARTBEAT_INTERVAL_SEC = 10  # Renovar heartbeat HTTP a cada 10s
+# Timeout da requisição (read): MySQL lento no central ou rede ruim — pode subir via env (ex.: 30).
+HEARTBEAT_HTTP_TIMEOUT_SEC = int(os.environ.get("HEARTBEAT_HTTP_TIMEOUT_SEC", "25"))
 
 
 def _player_heartbeat_loop():
@@ -3535,7 +3578,7 @@ def _player_heartbeat_loop():
                     f'{BASE_URL}/player/heartbeat',
                     json={'redis_mode': _get_redis_mode()},
                     headers=headers,
-                    timeout=15,
+                    timeout=max(10, HEARTBEAT_HTTP_TIMEOUT_SEC),
                     verify=False,
                     proxies=REQUESTS_NO_PROXY,
                 )
